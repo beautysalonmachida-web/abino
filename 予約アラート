@@ -1,0 +1,202 @@
+/**
+ * @fileoverview 予約遅延アラート機能
+ * 予約開始日を過ぎても処理（貸出など）が行われていない予約を検知しメールで通知します。
+ */
+
+// ================================================================
+// 予約遅延アラート機能
+// ================================================================
+
+/**
+ * 予約日を過ぎても「予約」ステータスのままの履歴をチェックし、通知メールを送信します。
+ * * 【トリガー設定】
+ * - イベントのソース: 時間主導型
+ * - タイプ: 日付ベースのタイマー
+ * - 時刻: 毎日 午前8時〜9時（任意の時刻）
+ * * 【依存関係】
+ * 以下のグローバル定数・変数に依存します（Code.gs参照）:
+ * - ss: SpreadsheetAppオブジェクト
+ * - rentalSheet: 貸出履歴シート
+ * - HISTORY_HEADER: 貸出履歴シートのヘッダー配列
+ * * 【メールマスタ設定】
+ * - メール種類（B列）には「予約日超過」と設定してください。
+ */
+function checkOverdueReservations() {
+  // --------------------------------------------------------------
+  // 1. 初期設定と定数定義
+  // --------------------------------------------------------------
+  const APP_URL = 'https://script.google.com/macros/s/AKfycbx8LVrIL2h967yL-hKSsTqua6zL9zV1vhscbKzbtBZlEx2s1AavaHZylHKjsNM3lC-u/exec';
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0); // 時刻を00:00:00にリセットして日付のみで比較
+
+  const lastRow = rentalSheet.getLastRow();
+  if (lastRow < 2) {
+    console.log('チェック対象の履歴がありません。');
+    return;
+  }
+
+  // --------------------------------------------------------------
+  // 2. 履歴データの取得と列インデックスの特定
+  // --------------------------------------------------------------
+  // HISTORY_HEADERから列インデックスを取得
+  const statusColIndex = HISTORY_HEADER.indexOf('処理');       // ステータス（予約、貸出など）
+  const reserveDateColIndex = HISTORY_HEADER.indexOf('貸与日'); // 予約開始日
+  const idColIndex = HISTORY_HEADER.indexOf('管理番号');
+  const nameColIndex = HISTORY_HEADER.indexOf('物品名');
+  const borrowerColIndex = HISTORY_HEADER.indexOf('貸与者');
+  
+  // 履歴シートには「カテゴリ」列がないため、ヘルパー関数で物品マスタからマップを作成
+  const categoryOrderMap = getCategoryMapForItemIds();
+
+  // 必須列の存在チェック
+  if (statusColIndex === -1 || reserveDateColIndex === -1 || idColIndex === -1) {
+    console.error('エラー: 必須列（処理、貸与日、管理番号）が見つかりません。処理を中断します。');
+    return;
+  }
+
+  const historyValues = rentalSheet.getRange(2, 1, lastRow - 1, HISTORY_HEADER.length).getValues();
+  
+  // --------------------------------------------------------------
+  // 3. 遅延予約の抽出
+  // --------------------------------------------------------------
+  const overdueReservations = [];
+
+  historyValues.forEach(row => {
+    const status = row[statusColIndex];
+    const reserveDateValue = row[reserveDateColIndex];
+
+    // 対象: ステータスが「予約」かつ 予約日が有効な日付データ
+    if (status === '予約' && reserveDateValue instanceof Date) {
+      const normalizedReserveDate = new Date(reserveDateValue);
+      normalizedReserveDate.setHours(0, 0, 0, 0);
+
+      // 判定: 予約開始日が今日より前（昨日以前）なら遅延とみなす
+      if (normalizedReserveDate < today) {
+        const itemId = row[idColIndex];
+        const category = categoryOrderMap.get(String(itemId)) || ''; // マップからカテゴリ取得
+
+        overdueReservations.push({
+          id: itemId,
+          name: nameColIndex !== -1 ? row[nameColIndex] : 'N/A',
+          borrower: borrowerColIndex !== -1 ? row[borrowerColIndex] : 'N/A',
+          date: Utilities.formatDate(normalizedReserveDate, Session.getScriptTimeZone(), 'yyyy/MM/dd'),
+          category: category
+        });
+      }
+    }
+  });
+
+  // 遅延予約がなければここで終了
+  if (overdueReservations.length === 0) {
+    console.log('予約日を過ぎた未処理の予約はありません。');
+    return;
+  }
+
+  // --------------------------------------------------------------
+  // 4. メール送信先の特定
+  // --------------------------------------------------------------
+  const mailMasterSheet = ss.getSheetByName('メールマスタ');
+  if (!mailMasterSheet) return;
+
+  const mailValues = mailMasterSheet.getLastRow() > 1 
+    ? mailMasterSheet.getRange(2, 1, mailMasterSheet.getLastRow() - 1, 4).getValues() 
+    : [];
+
+  // ターゲットとなる宛先の抽出
+  // ※重要: メールマスタのB列が「予約日超過」となっている行を対象とします
+  const mailTargets = mailValues
+    .filter(row => row[1] === '予約日超過' && row[2])
+    .map(row => ({
+      address: row[2].trim(),
+      categories: row[3] ? row[3].toString().split(',').map(c => c.trim()) : []
+    }));
+
+  // デフォルト宛先（カテゴリ指定がない宛先）を抽出
+  const defaultRecipients = mailTargets
+    .filter(t => t.categories.length === 0)
+    .map(t => t.address);
+
+  // --------------------------------------------------------------
+  // 5. 宛先ごとのグルーピング
+  // --------------------------------------------------------------
+  const itemsByRecipient = new Map();
+
+  overdueReservations.forEach(item => {
+    // カテゴリに応じた特定宛先を探す
+    const specificTargets = mailTargets.filter(t => t.categories.includes(item.category));
+    
+    let recipients = [];
+    if (specificTargets.length > 0) {
+      recipients = specificTargets.map(t => t.address);
+    } else {
+      recipients = defaultRecipients;
+    }
+
+    const uniqueRecipients = [...new Set(recipients)].sort();
+    
+    if (uniqueRecipients.length > 0) {
+      const recipientKey = uniqueRecipients.join(',');
+      
+      if (!itemsByRecipient.has(recipientKey)) {
+        itemsByRecipient.set(recipientKey, []);
+      }
+      itemsByRecipient.get(recipientKey).push(item);
+    }
+  });
+
+  // --------------------------------------------------------------
+  // 6. メール送信実行
+  // --------------------------------------------------------------
+  itemsByRecipient.forEach((items, recipientString) => {
+    const subject = '【確認依頼】予約日を過ぎた未処理の予約';
+    
+    let body = '以下の予約が、予約日を過ぎても「貸出」処理されていません。\n\n';
+    body += '■ 該当の予約一覧\n';
+    
+    items.forEach(item => {
+      body += `・物品名: ${item.name} (管理番号: ${item.id})\n`;
+      body += `　- カテゴリ: ${item.category}\n`;
+      body += `　- 予約者: ${item.borrower || '未設定'}\n`;
+      body += `　- 予約日: ${item.date}\n\n`;
+    });
+
+    body += '貸与品管理アプリでご確認ください\n';
+    body += APP_URL;
+
+    try {
+      MailApp.sendEmail(recipientString, subject, body);
+      console.log(`[予約遅延] 送信成功: ${items.length}件 -> ${recipientString}`);
+    } catch (e) {
+      console.error(`[予約遅延] 送信エラー: ${recipientString} - ${e.message}`);
+    }
+  });
+}
+
+/**
+ * ヘルパー関数: 物品マスタから ID -> カテゴリ のマップを作成する
+ * * 貸出履歴シートには「カテゴリ」列が存在しないため、物品IDをキーにして
+ * 物品マスタからカテゴリ情報を引くために使用します。
+ * * @return {Map<string, string>} 物品IDをキー、カテゴリ名を値とするMap
+ */
+function getCategoryMapForItemIds() {
+  const map = new Map();
+  const itemSheet = ss.getSheetByName('物品マスタ');
+  if (!itemSheet) return map;
+  
+  const lastRow = itemSheet.getLastRow();
+  if (lastRow < 2) return map;
+
+  // HEADER配列はCode.gsのグローバル定数
+  const idIndex = HEADER.indexOf('管理番号');
+  const catIndex = HEADER.indexOf('カテゴリ');
+  
+  if (idIndex === -1 || catIndex === -1) return map;
+
+  const values = itemSheet.getRange(2, 1, lastRow - 1, HEADER.length).getValues();
+  values.forEach(row => {
+    map.set(String(row[idIndex]), row[catIndex]);
+  });
+  
+  return map;
+}
