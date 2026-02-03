@@ -301,31 +301,21 @@ function uploadInspectionReport(data) {
         const { itemId, fileName, mimeType, data: base64Data } = data;
         const decoded = Utilities.base64Decode(base64Data);
         const blob = Utilities.newBlob(decoded, mimeType, `検査成績表_${itemId}_${fileName}`);
-        
-        // ★修正: 保存先フォルダIDを指定。見つからない場合はマイドライブに保存するフォールバックを追加
-        let folder;
-        let saveLocationMessage = "";
 
+        let folder;
         try {
             folder = DriveApp.getFolderById(INSPECTION_FOLDER_ID);
-            saveLocationMessage = "指定フォルダに保存しました。";
         } catch (e) {
-            console.warn('指定フォルダへのアクセスに失敗しました。ID: ' + INSPECTION_FOLDER_ID + ' エラー: ' + e.message);
-            // 権限エラーの場合、例外をスローしてキャッチさせる
-            if (e.message.includes('permission') || e.message.includes('権限')) {
-                 throw e; 
-            }
-
-            try {
-               folder = DriveApp.getRootFolder(); 
-               saveLocationMessage = "指定フォルダが見つからなかったため、マイドライブに保存しました。";
-            } catch (e2) {
-               throw e2; // マイドライブすら権限がない場合はエラー
-            }
+            Logger.log('フォルダアクセスエラー: ' + e.message);
+            throw new Error(
+                '検査成績表の保存先フォルダにアクセスできません。\n' +
+                '【対処法】GASエディタで「doAuthorize」関数を手動実行し、Googleドライブの権限を承認してから、新しいバージョンで再デプロイしてください。\n' +
+                '(フォルダID: ' + INSPECTION_FOLDER_ID + ')'
+            );
         }
 
         const file = folder.createFile(blob);
-        file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW); // 閲覧権限設定
+        file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
         const fileUrl = file.getUrl();
 
         const itemRow = findRowById(itemSheet, itemId);
@@ -336,16 +326,10 @@ function uploadInspectionReport(data) {
 
         itemSheet.getRange(itemRow, colIndex + 1).setValue(fileUrl);
 
-        return { success: true, message: `検査成績表を保存しました。(${saveLocationMessage})` };
+        return { success: true, message: '検査成績表を保存しました。' };
     } catch (e) {
         Logger.log('Error in uploadInspectionReport: ' + e.message + e.stack);
-        // エラーメッセージに権限エラーのヒントを含める
-        if (e.message.includes("permission") || e.message.includes("権限")) {
-             const msg = "【重要:権限エラー】Googleドライブへのアクセス権限がありません。\n" + 
-                         "GASエディタで「doAuthorize」関数を実行し、権限を承認してから再度デプロイしてください。";
-             return { success: false, message: msg };
-        }
-        return { success: false, message: '保存に失敗しました: ' + e.message };
+        return { success: false, message: e.message };
     } finally {
         lock.releaseLock();
     }
@@ -1289,23 +1273,22 @@ function getItemNameById(itemId) {
 
 /**
  * 【重要】権限承認用関数
- * この関数はアプリのロジックでは使用しませんが、
- * 初回にDriveAppの権限承認ポップアップを出すために、
- * 開発者がエディタ上で手動実行するために用意しています。
+ * この関数はアプリのロジックでは使用しません。
+ * GASエディタで手動実行し、Googleドライブの読み書き権限を承認してください。
+ *
+ * 手順:
+ *   1. GASエディタでこの関数を選択して「実行」をクリック
+ *   2. 権限の承認ダイアログが表示されたら「許可」する
+ *   3. 実行ログで「成功」と表示されることを確認
+ *   4. デプロイ → デプロイを管理 → 新しいバージョンで再デプロイ
  */
 function doAuthorize() {
-  const folderId = INSPECTION_FOLDER_ID;
-  try {
-    const folder = DriveApp.getFolderById(folderId);
-    console.log("成功: フォルダへのアクセス権限は正常です。フォルダ名: " + folder.getName());
-  } catch (e) {
-    console.warn("フォルダへのアクセス確認中にエラーが発生しましたが、権限承認プロセスは実行されました。エラー: " + e.message);
-    console.log("マイドライブへのアクセスを試みます...");
-    try {
-        DriveApp.getRootFolder();
-        console.log("マイドライブへのアクセス権限は正常です。");
-    } catch(e2) {
-        console.error("マイドライブへのアクセスも失敗しました。権限付与が必要です。: " + e2.message);
-    }
-  }
+  // フォルダへの読み取りアクセス確認
+  const folder = DriveApp.getFolderById(INSPECTION_FOLDER_ID);
+  console.log("フォルダ「" + folder.getName() + "」への読み取りOK");
+
+  // ファイル書き込み権限の確認（テストファイルを作成→即削除）
+  const testFile = folder.createFile('_権限テスト.txt', 'テスト', 'text/plain');
+  testFile.setTrashed(true);
+  console.log("成功: ファイル書き込み権限もOKです。新しいバージョンで再デプロイしてください。");
 }
