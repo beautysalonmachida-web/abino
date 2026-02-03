@@ -335,6 +335,47 @@ function uploadInspectionReport(data) {
     }
 }
 
+/**
+ * 検査成績表を削除する（Driveのファイルをゴミ箱に移動し、物品マスタのURLをクリア）
+ * @param {string} itemId 管理番号
+ */
+function deleteInspectionReport(itemId) {
+    const lock = LockService.getScriptLock();
+    lock.waitLock(15000);
+    try {
+        const itemRow = findRowById(itemSheet, itemId);
+        if (itemRow === -1) throw new Error('対象の物品が見つかりません。');
+
+        const colIndex = HEADER.indexOf('検査成績表');
+        if (colIndex === -1) throw new Error('物品マスタに「検査成績表」列がありません。');
+
+        const fileUrl = itemSheet.getRange(itemRow, colIndex + 1).getValue();
+        if (!fileUrl) throw new Error('検査成績表が登録されていません。');
+
+        // Google DriveのURLからファイルIDを抽出してゴミ箱へ移動
+        try {
+            const fileIdMatch = fileUrl.match(/[-\w]{25,}/);
+            if (fileIdMatch) {
+                const file = DriveApp.getFileById(fileIdMatch[0]);
+                file.setTrashed(true);
+            }
+        } catch (e) {
+            Logger.log('Driveファイル削除時の警告: ' + e.message);
+            // ファイルが既に削除済みでもURL欄のクリアは続行する
+        }
+
+        // 物品マスタの検査成績表URLをクリア
+        itemSheet.getRange(itemRow, colIndex + 1).setValue('');
+
+        return { success: true, message: '検査成績表を削除しました。', shouldReload: true };
+    } catch (e) {
+        Logger.log('Error in deleteInspectionReport: ' + e.message + e.stack);
+        return { success: false, message: e.message };
+    } finally {
+        lock.releaseLock();
+    }
+}
+
 // ----------------------------------------------------------------
 // 貸出・返却・予約 処理
 // ----------------------------------------------------------------
