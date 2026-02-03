@@ -1,0 +1,124 @@
+// ----------------------------------------------------------------
+// アラート機能
+// ----------------------------------------------------------------
+
+/**
+ * 校正期限が近い物品をチェックし、メールで通知します。
+ * この関数を毎日実行するようにトリガー設定をしてください。
+ *
+ * ※このコードは、コード.gs で定義されている以下のグローバル定数に依存します:
+ * ss, itemSheet, rentalSheet, HEADER, HISTORY_HEADER
+ */
+function checkCalibrationDatesAndSendAlerts() {
+  const NOTIFICATION_DAYS_BEFORE = 30; // 30日前に通知
+  
+  // ★アプリのURLを貼り付け
+  const APP_URL = 'https://script.google.com/macros/s/AKfycbx8LVrIL2h967yL-hKSsTqua6zL9zV1vhscbKzbtBZlEx2s1AavaHZylHKjsNM3lC-u/exec';
+
+  // 定数設定を Code.gs と共有
+  const dateColIndex = HEADER.indexOf('校正日・入替日');
+  const nameColIndex = HEADER.indexOf('物品名');
+  const idColIndex = HEADER.indexOf('管理番号');
+  const categoryColIndex = HEADER.indexOf('カテゴリ'); 
+
+  if (dateColIndex === -1 || categoryColIndex === -1) {
+    console.error('必要な列（校正日・入替日、カテゴリ）が見つかりません。');
+    return;
+  }
+
+  const values = itemSheet.getLastRow() > 1 ? itemSheet.getRange(2, 1, itemSheet.getLastRow() - 1, HEADER.length).getValues() : [];
+  
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const targetDate = new Date(today);
+  targetDate.setDate(today.getDate() + NOTIFICATION_DAYS_BEFORE);
+
+  const expiringItems = [];
+
+  values.forEach(row => {
+    const calibDateValue = row[dateColIndex];
+    if (calibDateValue instanceof Date) {
+      const calibDate = new Date(calibDateValue);
+      calibDate.setHours(0, 0, 0, 0);
+
+      // 期限が今日からNOTIFICATION_DAYS_BEFORE日後の間に含まれるものを抽出
+      if (calibDate >= today && calibDate <= targetDate) {
+        expiringItems.push({
+          id: row[idColIndex],
+          name: row[nameColIndex],
+          date: Utilities.formatDate(calibDate, Session.getScriptTimeZone(), 'yyyy/MM/dd'),
+          category: row[categoryColIndex] || ''
+        });
+      }
+    }
+  });
+
+  if (expiringItems.length > 0) {
+    // 1. メールマスタから宛先情報を取得
+    const mailMasterSheet = ss.getSheetByName('メールマスタ');
+    if (!mailMasterSheet) return;
+
+    const mailValues = mailMasterSheet.getLastRow() > 1 
+      ? mailMasterSheet.getRange(2, 1, mailMasterSheet.getLastRow() - 1, 4).getValues() 
+      : [];
+
+    // '校正期限' タイプの宛先リストを作成
+    const mailTargets = mailValues
+      .filter(row => row[1] === '校正期限' && row[2])
+      .map(row => ({
+        address: row[2].trim(),
+        categories: row[3] ? row[3].toString().split(',').map(c => c.trim()) : []
+      }));
+
+    // 2. アイテムを「宛先ごと」に振り分ける
+    const itemsByRecipient = new Map();
+    const defaultRecipients = mailTargets
+      .filter(t => t.categories.length === 0)
+      .map(t => t.address);
+
+    expiringItems.forEach(item => {
+      const specificTargets = mailTargets.filter(t => t.categories.includes(item.category));
+      
+      let recipients = [];
+      if (specificTargets.length > 0) {
+        recipients = specificTargets.map(t => t.address);
+      } else {
+        recipients = defaultRecipients;
+      }
+
+      const uniqueRecipients = [...new Set(recipients)].sort();
+      
+      if (uniqueRecipients.length > 0) {
+        const recipientKey = uniqueRecipients.join(',');
+        if (!itemsByRecipient.has(recipientKey)) {
+          itemsByRecipient.set(recipientKey, []);
+        }
+        itemsByRecipient.get(recipientKey).push(item);
+      }
+    });
+
+    // 3. グループごとにメール送信
+    itemsByRecipient.forEach((items, recipientString) => {
+      let subject = '【貸与品管理】校正期限が近い物品のお知らせ';
+      let body = '以下の物品の校正・入替期限が近づいています。\n\n';
+      
+      items.sort((a, b) => new Date(a.date) - new Date(b.date)); // 日付順にソート
+
+      items.forEach(item => {
+        body += `・管理番号: ${item.id}\n`;
+        body += `  物品名: ${item.name}\n`;
+        body += `  カテゴリ: ${item.category}\n`;
+        body += `  期限日: ${item.date}\n\n`;
+      });
+      
+      body += `貸与品管理アプリでご確認ください:\n${APP_URL}`;
+
+      MailApp.sendEmail(recipientString, subject, body);
+      console.log(`[校正期限] ${items.length}件の通知を ${recipientString} に送信しました。`);
+    });
+
+  } else {
+    console.log('通知対象の物品はありませんでした。');
+  }
+}
