@@ -1274,7 +1274,7 @@ function getItemNameById(itemId) {
 /**
  * 【重要】権限承認用関数
  * この関数はアプリのロジックでは使用しません。
- * GASエディタで手動実行し、Googleドライブの権限を承認してください。
+ * GASエディタで手動実行し、Googleドライブの読み書き権限を承認してください。
  *
  * 手順:
  *   1. GASエディタでこの関数を選択して「実行」をクリック
@@ -1283,7 +1283,12 @@ function getItemNameById(itemId) {
  *   4. デプロイ → デプロイを管理 → 新しいバージョンで再デプロイ
  */
 function doAuthorize() {
-  // DriveApp を呼び出すことで、OAuth スコープ (drive) の承認を促す
+  // フォルダへの読み取りアクセス確認
   const folder = DriveApp.getFolderById(INSPECTION_FOLDER_ID);
-  console.log("成功: フォルダ「" + folder.getName() + "」にアクセスできました。新しいバージョンで再デプロイしてください。");
+  console.log("フォルダ「" + folder.getName() + "」への読み取りOK");
+
+  // ファイル書き込み権限の確認（テストファイルを作成→即削除）
+  const testFile = folder.createFile('_権限テスト.txt', 'テスト', 'text/plain');
+  testFile.setTrashed(true);
+  console.log("成功: ファイル書き込み権限もOKです。新しいバージョンで再デプロイしてください。");
 }
